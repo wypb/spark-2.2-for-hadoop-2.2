@@ -2518,17 +2518,11 @@
       <properties>
         <hadoop.version>2.2.0</hadoop.version>
       </properties>
-      <modules>
-        <module>core-hadoop/hadoop-2.2</module>
-      </modules>
     </profile>
 
     <profile>
       <id>hadoop-2.6</id>
       <!-- Default hadoop profile. Uses global properties. -->
-      <modules>
-        <module>core-hadoop/hadoop</module>
-      </modules>
     </profile>
 
     <profile>
@@ -2536,9 +2530,6 @@
       <properties>
         <hadoop.version>2.7.3</hadoop.version>
       </properties>
-      <modules>
-        <module>core-hadoop/hadoop</module>
-      </modules>
     </profile>
 
     <profile>
