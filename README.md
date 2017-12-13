@@ -20,6 +20,7 @@ Examples:
     # Apache Hadoop 2.7.X and later
     ./dev/make-distribution.sh --tgz -Phadoop-2.7 -Pyarn -DskipTests
 
+More detail: <https://www.iteblog.com/archives/2305.html>
 
 # Apache Spark
 
