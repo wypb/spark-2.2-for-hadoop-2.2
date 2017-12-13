@@ -1,3 +1,26 @@
+# Apache Spark 2.2.1 for Hadoop 2.2+
+
+This repository's Spark version is 2.2.1, and support Hadoop 2.2, 2.3, 2.4, 2.5, 2.6, 2.7 etc.
+
+You can specify the exact version of Hadoop to compile against through the hadoop.version property. If unset, Spark will build against Hadoop 2.6.5 by default.
+
+You can enable the yarn profile and optionally set the yarn.version property if it is different from hadoop.version.
+
+Examples:
+
+    # Apache Hadoop 2.2.0
+    ./dev/make-distribution.sh --tgz -Phadoop-2.2 -Pyarn -DskipTests
+    
+    # Apache Hadoop 2.3.0
+    ./dev/make-distribution.sh --tgz -Phadoop-2.2 -Dhadoop.version=2.3.0 -Pyarn -DskipTests
+        
+    # Apache Hadoop 2.6.5
+    ./dev/make-distribution.sh --tgz -Phadoop-2.6 -Pyarn -DskipTests
+        
+    # Apache Hadoop 2.7.X and later
+    ./dev/make-distribution.sh --tgz -Phadoop-2.7 -Pyarn -DskipTests
+
+
 # Apache Spark
 
 Spark is a fast and general cluster computing system for Big Data. It provides
