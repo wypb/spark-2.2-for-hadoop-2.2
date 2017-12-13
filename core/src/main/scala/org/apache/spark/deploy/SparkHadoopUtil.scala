@@ -18,17 +18,19 @@
 package org.apache.spark.deploy
 
 import java.io.IOException
+import java.lang.reflect.Method
 import java.security.PrivilegedExceptionAction
 import java.text.DateFormat
 import java.util.{Arrays, Comparator, Date, Locale}
 
 import scala.collection.JavaConverters._
-import scala.collection.mutable
 import scala.util.control.NonFatal
 
 import com.google.common.primitives.Longs
 import org.apache.hadoop.conf.Configuration
-import org.apache.hadoop.fs.{FileStatus, FileSystem, Path, PathFilter}
+import org.apache.hadoop.fs.{FileStatus, Path, PathFilter}
+import org.apache.hadoop.fs.FileSystem
+import org.apache.hadoop.fs.FileSystem.Statistics
 import org.apache.hadoop.fs.permission.FsAction
 import org.apache.hadoop.mapred.JobConf
 import org.apache.hadoop.security.{Credentials, UserGroupInformation}
@@ -41,9 +43,9 @@ import org.apache.spark.internal.Logging
 import org.apache.spark.util.Utils
 
 /**
-  * :: DeveloperApi ::
-  * Contains util methods to interact with Hadoop from Spark.
-  */
+ * :: DeveloperApi ::
+ * Contains util methods to interact with Hadoop from Spark.
+ */
 @DeveloperApi
 class SparkHadoopUtil extends Logging {
   private val sparkConf = new SparkConf(false).loadFromSystemProperties(true)
@@ -51,13 +53,13 @@ class SparkHadoopUtil extends Logging {
   UserGroupInformation.setConfiguration(conf)
 
   /**
-    * Runs the given function with a Hadoop UserGroupInformation as a thread local variable
-    * (distributed to child threads), used for authenticating HDFS and YARN calls.
-    *
-    * IMPORTANT NOTE: If this function is going to be called repeated in the same process
-    * you need to look https://issues.apache.org/jira/browse/HDFS-3545 and possibly
-    * do a FileSystem.closeAllForUGI in order to avoid leaking Filesystems
-    */
+   * Runs the given function with a Hadoop UserGroupInformation as a thread local variable
+   * (distributed to child threads), used for authenticating HDFS and YARN calls.
+   *
+   * IMPORTANT NOTE: If this function is going to be called repeated in the same process
+   * you need to look https://issues.apache.org/jira/browse/HDFS-3545 and possibly
+   * do a FileSystem.closeAllForUGI in order to avoid leaking Filesystems
+   */
   def runAsSparkUser(func: () => Unit) {
     val user = Utils.getCurrentUserName()
     logDebug("running as user: " + user)
@@ -76,9 +78,9 @@ class SparkHadoopUtil extends Logging {
 
 
   /**
-    * Appends S3-specific, spark.hadoop.*, and spark.buffer.size configurations to a Hadoop
-    * configuration.
-    */
+   * Appends S3-specific, spark.hadoop.*, and spark.buffer.size configurations to a Hadoop
+   * configuration.
+   */
   def appendS3AndSparkHadoopConfigurations(conf: SparkConf, hadoopConf: Configuration): Unit = {
     // Note: this null check is around more than just access to the "conf" object to maintain
     // the behavior of the old implementation of this code, for backwards compatibility.
@@ -111,9 +113,9 @@ class SparkHadoopUtil extends Logging {
   }
 
   /**
-    * Return an appropriate (subclass) of Configuration. Creating config can initializes some Hadoop
-    * subsystems.
-    */
+   * Return an appropriate (subclass) of Configuration. Creating config can initializes some Hadoop
+   * subsystems.
+   */
   def newConfiguration(conf: SparkConf): Configuration = {
     val hadoopConf = new Configuration()
     appendS3AndSparkHadoopConfigurations(conf, hadoopConf)
@@ -121,9 +123,9 @@ class SparkHadoopUtil extends Logging {
   }
 
   /**
-    * Add any user credentials to the job conf which are necessary for running on a secure Hadoop
-    * cluster.
-    */
+   * Add any user credentials to the job conf which are necessary for running on a secure Hadoop
+   * cluster.
+   */
   def addCredentials(conf: JobConf) {}
 
   def isYarnMode(): Boolean = { false }
@@ -141,62 +143,70 @@ class SparkHadoopUtil extends Logging {
   }
 
   /**
-    * Returns a function that can be called to find Hadoop FileSystem bytes read. If
-    * getFSBytesReadOnThreadCallback is called from thread r at time t, the returned callback will
-    * return the bytes read on r since t.
-    */
+   * Returns a function that can be called to find Hadoop FileSystem bytes read. If
+   * getFSBytesReadOnThreadCallback is called from thread r at time t, the returned callback will
+   * return the bytes read on r since t.
+   */
   private[spark] def getFSBytesReadOnThreadCallback(): () => Long = {
-    val f = () => FileSystem.getAllStatistics.asScala.map(_.getThreadStatistics.getBytesRead).sum
-    val baseline = (Thread.currentThread().getId, f())
-
-    /**
-      * This function may be called in both spawned child threads and parent task thread (in
-      * PythonRDD), and Hadoop FileSystem uses thread local variables to track the statistics.
-      * So we need a map to track the bytes read from the child threads and parent thread,
-      * summing them together to get the bytes read of this task.
-      */
-    new Function0[Long] {
-      private val bytesReadMap = new mutable.HashMap[Long, Long]()
-
-      override def apply(): Long = {
-        bytesReadMap.synchronized {
-          bytesReadMap.put(Thread.currentThread().getId, f())
-          bytesReadMap.map { case (k, v) =>
-            v - (if (k == baseline._1) baseline._2 else 0)
-          }.sum
-        }
-      }
+    try {
+      val threadStats = getFileSystemThreadStatistics()
+      val getBytesReadMethod = getFileSystemThreadStatisticsMethod("getBytesRead")
+      val f = () => threadStats.map(getBytesReadMethod.invoke(_).asInstanceOf[Long]).sum
+      val baselineBytesRead = f()
+      () => f() - baselineBytesRead
+    } catch {
+      case e @ (_: NoSuchMethodException | _: ClassNotFoundException) =>
+        logDebug("Couldn't find method for retrieving thread-level FileSystem input data", e)
+        () => 0L
     }
   }
 
   /**
-    * Returns a function that can be called to find Hadoop FileSystem bytes written. If
-    * getFSBytesWrittenOnThreadCallback is called from thread r at time t, the returned callback will
-    * return the bytes written on r since t.
-    *
-    * @return None if the required method can't be found.
-    */
+   * Returns a function that can be called to find Hadoop FileSystem bytes written. If
+   * getFSBytesWrittenOnThreadCallback is called from thread r at time t, the returned callback will
+   * return the bytes written on r since t.
+   *
+   * @return None if the required method can't be found.
+   */
   private[spark] def getFSBytesWrittenOnThreadCallback(): () => Long = {
-    val threadStats = FileSystem.getAllStatistics.asScala.map(_.getThreadStatistics)
-    val f = () => threadStats.map(_.getBytesWritten).sum
-    val baselineBytesWritten = f()
-    () => f() - baselineBytesWritten
+    try {
+      val threadStats = getFileSystemThreadStatistics()
+      val getBytesWrittenMethod = getFileSystemThreadStatisticsMethod("getBytesWritten")
+      val f = () => threadStats.map(getBytesWrittenMethod.invoke(_).asInstanceOf[Long]).sum
+      val baselineBytesWritten = f()
+      () => f() - baselineBytesWritten
+    } catch {
+      case e @ (_: NoSuchMethodException | _: ClassNotFoundException) =>
+        logDebug("Couldn't find method for retrieving thread-level FileSystem output data", e)
+        () => 0L
+    }
+  }
+
+  private def getFileSystemThreadStatistics(): Seq[AnyRef] = {
+    FileSystem.getAllStatistics.asScala.map(
+      Utils.invoke(classOf[Statistics], _, "getThreadStatistics"))
+  }
+
+  private def getFileSystemThreadStatisticsMethod(methodName: String): Method = {
+    val statisticsDataClass =
+      Utils.classForName("org.apache.hadoop.fs.FileSystem$Statistics$StatisticsData")
+    statisticsDataClass.getDeclaredMethod(methodName)
   }
 
   /**
-    * Get [[FileStatus]] objects for all leaf children (files) under the given base path. If the
-    * given path points to a file, return a single-element collection containing [[FileStatus]] of
-    * that file.
-    */
+   * Get [[FileStatus]] objects for all leaf children (files) under the given base path. If the
+   * given path points to a file, return a single-element collection containing [[FileStatus]] of
+   * that file.
+   */
   def listLeafStatuses(fs: FileSystem, basePath: Path): Seq[FileStatus] = {
     listLeafStatuses(fs, fs.getFileStatus(basePath))
   }
 
   /**
-    * Get [[FileStatus]] objects for all leaf children (files) under the given base path. If the
-    * given path points to a file, return a single-element collection containing [[FileStatus]] of
-    * that file.
-    */
+   * Get [[FileStatus]] objects for all leaf children (files) under the given base path. If the
+   * given path points to a file, return a single-element collection containing [[FileStatus]] of
+   * that file.
+   */
   def listLeafStatuses(fs: FileSystem, baseStatus: FileStatus): Seq[FileStatus] = {
     def recurse(status: FileStatus): Seq[FileStatus] = {
       val (directories, leaves) = fs.listStatus(status.getPath).partition(_.isDirectory)
@@ -245,15 +255,15 @@ class SparkHadoopUtil extends Logging {
   }
 
   /**
-    * Lists all the files in a directory with the specified prefix, and does not end with the
-    * given suffix. The returned {{FileStatus}} instances are sorted by the modification times of
-    * the respective files.
-    */
+   * Lists all the files in a directory with the specified prefix, and does not end with the
+   * given suffix. The returned {{FileStatus}} instances are sorted by the modification times of
+   * the respective files.
+   */
   def listFilesSorted(
-                       remoteFs: FileSystem,
-                       dir: Path,
-                       prefix: String,
-                       exclusionSuffix: String): Array[FileStatus] = {
+      remoteFs: FileSystem,
+      dir: Path,
+      prefix: String,
+      exclusionSuffix: String): Array[FileStatus] = {
     try {
       val fileStatuses = remoteFs.listStatus(dir,
         new PathFilter {
@@ -285,19 +295,19 @@ class SparkHadoopUtil extends Logging {
   private val HADOOP_CONF_PATTERN = "(\\$\\{hadoopconf-[^\\}\\$\\s]+\\})".r.unanchored
 
   /**
-    * Substitute variables by looking them up in Hadoop configs. Only variables that match the
-    * ${hadoopconf- .. } pattern are substituted.
-    */
+   * Substitute variables by looking them up in Hadoop configs. Only variables that match the
+   * ${hadoopconf- .. } pattern are substituted.
+   */
   def substituteHadoopVariables(text: String, hadoopConf: Configuration): String = {
     text match {
       case HADOOP_CONF_PATTERN(matched) =>
         logDebug(text + " matched " + HADOOP_CONF_PATTERN)
         val key = matched.substring(13, matched.length() - 1) // remove ${hadoopconf- .. }
-      val eval = Option[String](hadoopConf.get(key))
-        .map { value =>
-          logDebug("Substituted " + matched + " with " + value)
-          text.replace(matched, value)
-        }
+        val eval = Option[String](hadoopConf.get(key))
+          .map { value =>
+            logDebug("Substituted " + matched + " with " + value)
+            text.replace(matched, value)
+          }
         if (eval.isEmpty) {
           // The variable was not found in Hadoop configs, so return text as is.
           text
@@ -312,23 +322,23 @@ class SparkHadoopUtil extends Logging {
   }
 
   /**
-    * Start a thread to periodically update the current user's credentials with new credentials so
-    * that access to secured service does not fail.
-    */
+   * Start a thread to periodically update the current user's credentials with new credentials so
+   * that access to secured service does not fail.
+   */
   private[spark] def startCredentialUpdater(conf: SparkConf) {}
 
   /**
-    * Stop the thread that does the credential updates.
-    */
+   * Stop the thread that does the credential updates.
+   */
   private[spark] def stopCredentialUpdater() {}
 
   /**
-    * Return a fresh Hadoop configuration, bypassing the HDFS cache mechanism.
-    * This is to prevent the DFSClient from using an old cached token to connect to the NameNode.
-    */
+   * Return a fresh Hadoop configuration, bypassing the HDFS cache mechanism.
+   * This is to prevent the DFSClient from using an old cached token to connect to the NameNode.
+   */
   private[spark] def getConfBypassingFSCache(
-                                              hadoopConf: Configuration,
-                                              scheme: String): Configuration = {
+      hadoopConf: Configuration,
+      scheme: String): Configuration = {
     val newConf = new Configuration(hadoopConf)
     val confKey = s"fs.${scheme}.impl.disable.cache"
     newConf.setBoolean(confKey, true)
@@ -336,11 +346,11 @@ class SparkHadoopUtil extends Logging {
   }
 
   /**
-    * Dump the credentials' tokens to string values.
-    *
-    * @param credentials credentials
-    * @return an iterator over the string values. If no credentials are passed in: an empty list
-    */
+   * Dump the credentials' tokens to string values.
+   *
+   * @param credentials credentials
+   * @return an iterator over the string values. If no credentials are passed in: an empty list
+   */
   private[spark] def dumpTokens(credentials: Credentials): Iterable[String] = {
     if (credentials != null) {
       credentials.getAllTokens.asScala.map(tokenToString)
@@ -350,13 +360,13 @@ class SparkHadoopUtil extends Logging {
   }
 
   /**
-    * Convert a token to a string for logging.
-    * If its an abstract delegation token, attempt to unmarshall it and then
-    * print more details, including timestamps in human-readable form.
-    *
-    * @param token token to convert to a string
-    * @return a printable string value.
-    */
+   * Convert a token to a string for logging.
+   * If its an abstract delegation token, attempt to unmarshall it and then
+   * print more details, including timestamps in human-readable form.
+   *
+   * @param token token to convert to a string
+   * @return a printable string value.
+   */
   private[spark] def tokenToString(token: Token[_ <: TokenIdentifier]): String = {
     val df = DateFormat.getDateTimeInstance(DateFormat.SHORT, DateFormat.SHORT, Locale.US)
     val buffer = new StringBuilder(128)
@@ -418,17 +428,17 @@ object SparkHadoopUtil {
   val SPARK_YARN_CREDS_COUNTER_DELIM = "-"
 
   /**
-    * Number of records to update input metrics when reading from HadoopRDDs.
-    *
-    * Each update is potentially expensive because we need to use reflection to access the
-    * Hadoop FileSystem API of interest (only available in 2.5), so we should do this sparingly.
-    */
+   * Number of records to update input metrics when reading from HadoopRDDs.
+   *
+   * Each update is potentially expensive because we need to use reflection to access the
+   * Hadoop FileSystem API of interest (only available in 2.5), so we should do this sparingly.
+   */
   private[spark] val UPDATE_INPUT_METRICS_INTERVAL_RECORDS = 1000
 
   def get: SparkHadoopUtil = {
     // Check each time to support changing to/from YARN
     val yarnMode = java.lang.Boolean.parseBoolean(
-      System.getProperty("SPARK_YARN_MODE", System.getenv("SPARK_YARN_MODE")))
+        System.getProperty("SPARK_YARN_MODE", System.getenv("SPARK_YARN_MODE")))
     if (yarnMode) {
       yarn
     } else {
