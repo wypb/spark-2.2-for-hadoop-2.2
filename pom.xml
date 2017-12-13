@@ -2513,6 +2513,12 @@
     <!-- Hadoop-a.b.c dependencies can be found at
     http://hadoop.apache.org/docs/ra.b.c/hadoop-project-dist/hadoop-common/dependency-analysis.html
     -->
+    <profile>
+      <id>hadoop-2.2</id>
+      <properties>
+        <hadoop.version>2.2.0</hadoop.version>
+      </properties>
+    </profile>
 
     <profile>
       <id>hadoop-2.6</id>
@@ -2530,6 +2536,14 @@
       <id>yarn</id>
       <modules>
         <module>resource-managers/yarn</module>
+        <module>common/network-yarn</module>
+      </modules>
+    </profile>
+
+    <profile>
+      <id>yarn-2.2</id>
+      <modules>
+        <module>resource-managers/yarn-2.2</module>
         <module>common/network-yarn</module>
       </modules>
     </profile>
