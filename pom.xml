@@ -2541,14 +2541,6 @@
     </profile>
 
     <profile>
-      <id>yarn-2.2</id>
-      <modules>
-        <module>resource-managers/yarn-2.2</module>
-        <module>common/network-yarn</module>
-      </modules>
-    </profile>
-
-    <profile>
       <id>mesos</id>
       <modules>
         <module>resource-managers/mesos</module>
